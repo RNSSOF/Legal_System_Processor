@@ -30,8 +30,7 @@
 
     * **لأنظمة التشغيل Windows (PowerShell أو Git Bash):**
         ```bash
-        export GEMINI_API_KEY="YOUR_API_KEY_HERE"
-        # أو استخدم الأمر الخاص بـ PowerShell:
+         # أو استخدم الأمر الخاص بـ PowerShell:
         # $env:GEMINI_API_KEY="YOUR_API_KEY_HERE"
         ```
 
