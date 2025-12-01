@@ -3,13 +3,13 @@ import re
 import yaml
 import json
 import traceback
-import time # [تحسين جديد] لإضافة تأخير بين المحاولات
+import time
 from pathlib import Path
 from google import genai
 from google.genai.errors import APIError
 
 # --- ثوابت وإعدادات ---
-MAX_RETRIES = 3 # [تحسين جديد] عدد المحاولات القصوى للاتصال بـ Gemini
+MAX_RETRIES = 3 # عدد المحاولات القصوى للاتصال بـ Gemini
 
 # --- توابع مساعدة ---
 
@@ -18,8 +18,7 @@ def create_yaml_header(data):
     return "---\n" + yaml.dump(data, allow_unicode=True, sort_keys=False) + "---\n"
 
 def save_ocr_review_file(doc_slug, all_corrections, output_path):
-    # ... (هذه الدالة تبقى كما هي) ...
-    """وظيفة جديدة لإنشاء ملف ocr_review.json - تستخدم مسار المجلد الفرعي (output_path)"""
+    """وظيفة لإنشاء ملف ocr_review.json - تستخدم مسار المجلد الفرعي (output_path)"""
     
     if not all_corrections:
         return 
@@ -45,7 +44,7 @@ def save_ocr_review_file(doc_slug, all_corrections, output_path):
 
 
 # *******************************************************************
-# ### [تحسين جديد] دالة استخلاص السياق الأساسي
+# دالة استخلاص السياق الأساسي
 # *******************************************************************
 
 def get_core_context(doc_slug, source_folder="source_files"):
@@ -62,18 +61,13 @@ def get_core_context(doc_slug, source_folder="source_files"):
     with open(original_file_path, 'r', encoding='utf-8') as f:
         full_content = f.read()
 
-    # 1. استخلاص العنوان وبطاقة التشريع والنص الافتتاحي (كل ما يسبق قسم المواد)
-    # النمط يهدف لاستخلاص كل شيء يبدأ بالملف وينتهي قبل ظهور قسم المواد
     context_match = re.search(r'(.*?)(?=^## النص الكامل للمواد)', full_content, re.DOTALL | re.MULTILINE)
     
     if context_match:
         context_part = context_match.group(1).strip()
     else:
-        # إذا لم يتم العثور على العنوان القياسي، يتم أخذ أول 1000 حرف كسياق احتياطي
         context_part = full_content[:1000]
 
-    # 2. البحث عن التعريفات (عادة ما تكون المادة الأولى) وإضافتها للسياق
-    # نبحث عن المادة الأولى لنضمن التعريفات
     definitions_match = re.search(r'(## المادة 1.*?)(?=## المادة 2)', full_content, re.DOTALL | re.MULTILINE)
     
     if definitions_match:
@@ -82,7 +76,6 @@ def get_core_context(doc_slug, source_folder="source_files"):
         definitions_part = " [لم يتم العثور على مادة تعريفات واضحة في المادة 1]"
         
     
-    # بناء متغير السياق الكامل
     core_context = (
         f"--- السياق القانوني الأساسي (لتحليل دقيق) ---\n"
         f"{context_part}\n"
@@ -97,11 +90,11 @@ def get_core_context(doc_slug, source_folder="source_files"):
 
 
 # *******************************************************************
-# ### [تحسين جديد] دالة الاتصال بـ Gemini مع آلية إعادة المحاولة
+# ### [تعديل رئيسي] دالة الاتصال بـ Gemini مع حساب التوكنات
 # *******************************************************************
 
 def call_gemini_api(article_text, core_context):
-    """وظيفة الاتصال الفعلي بـ Gemini API لاستخلاص البيانات الوصفية مع آلية إعادة المحاولة."""
+    """وظيفة الاتصال الفعلي بـ Gemini API لاستخلاص البيانات الوصفية مع آلية إعادة المحاولة وحساب التوكنات."""
     
     if not os.getenv("GEMINI_API_KEY"):
         raise ValueError("يرجى تعيين متغير البيئة GEMINI_API_KEY قبل التشغيل.")
@@ -127,7 +120,7 @@ def call_gemini_api(article_text, core_context):
     ---
     {article_text}
     ---
-
+    
     البيانات المطلوبة في JSON:
     {{
       "summary": "ملخص مكثف للمادة (30 كلمة كحد أقصى) مع مراعاة التعريفات الواردة في السياق.",
@@ -144,15 +137,49 @@ def call_gemini_api(article_text, core_context):
     }}
     """
     
-    for attempt in range(MAX_RETRIES): # [تحسين جديد] بدء حلقة إعادة المحاولة
+    # ----------------------------------------------------
+    # ### [إضافة حساب توكنات المدخل]
+    # ----------------------------------------------------
+    contents_to_count = [
+        {"role": "system", "parts": [{"text": system_prompt}]},
+        {"role": "user", "parts": [{"text": user_prompt}]}
+    ]
+    
+    try:
+        # حساب التوكنات المدخلة قبل البدء بالمكالمة الفعلية
+        token_count_response = client.models.count_tokens(
+            model='gemini-2.5-flash',
+            contents=contents_to_count
+        )
+        input_tokens = token_count_response.total_tokens
+    except Exception as e:
+        input_tokens = 0
+        print(f"  ⚠️ فشل حساب توكنات المدخل: {e}. سيتم افتراض 0.")
+
+    # ----------------------------------------------------
+    
+    
+    for attempt in range(MAX_RETRIES):
         print(f"  ... جارٍ الاتصال بـ Gemini API لمعالجة البيانات (المحاولة {attempt + 1}/{MAX_RETRIES})...")
         try:
             response = client.models.generate_content(
                 model='gemini-2.5-flash',
+                # ملاحظة: تم تعديل contents لإرسال الـ user_prompt فقط لأن الـ system_instruction تم وضعه في config
                 contents=[user_prompt],
                 config={"system_instruction": system_prompt, "response_mime_type": "application/json", "temperature": 0.0}
             )
-            return json.loads(response.text.strip())
+            
+            # ----------------------------------------------------
+            # ### [استخلاص توكنات المخرج]
+            # ----------------------------------------------------
+            usage_metadata = response.usage_metadata
+            # توكنات المرشحين (candidates) هي ما يمثل الرد النهائي للموديل
+            output_tokens = usage_metadata.candidates_token_count
+            
+            llm_data = json.loads(response.text.strip())
+            
+            # [تعديل الإرجاع] ليعيد البيانات والتوكنات
+            return llm_data, input_tokens, output_tokens
             
         except APIError as e:
             if 'permission denied' in str(e).lower() or '403' in str(e):
@@ -169,10 +196,15 @@ def call_gemini_api(article_text, core_context):
             if attempt < MAX_RETRIES - 1:
                 time.sleep(5)
             else:
-                return {} # نرجع قيمة فارغة إذا فشلت جميع المحاولات
+                # [تعديل الإرجاع] في حالة الفشل نرجع بيانات فارغة وتوكنات 0
+                return {}, 0, 0 
                 
         except Exception as e:
             raise Exception(f"حدث خطأ عام أثناء استدعاء API: {e}")
+    
+    # [إرجاع الفشل] إذا لم تنجح أي محاولة
+    return {}, 0, 0 
+
 
 # ... (باقي الدوال load_yaml_and_content و update_alu_file تبقى كما هي) ...
 
@@ -215,15 +247,19 @@ def update_alu_file(file_path, new_metadata, text_content):
 
 
 # *******************************************************************
-# الوظيفة الرئيسية المُحدَّثة
+# الوظيفة الرئيسية المُحدَّثة (مع تجميع التوكنات)
 # *******************************************************************
 
 def process_enrichment(input_folder="processed_systems_output"):
     """الوظيفة الرئيسية لتشغيل الإثراء على جميع الوثائق داخل المجلدات الفرعية."""
     
     base_path = Path(input_folder)
-    source_path = Path("source_files") # [تحسين جديد] تحديد مسار الملفات الأصلية
+    source_path = Path("source_files")
     
+    # [إضافة جديدة] متغيرات تجميع التوكنات
+    total_input_tokens_grand = 0 
+    total_output_tokens_grand = 0 
+
     if not base_path.exists():
         print(f"❌ لم يتم العثور على مجلد المخرجات: {input_folder}")
         return
@@ -242,10 +278,14 @@ def process_enrichment(input_folder="processed_systems_output"):
     for doc_folder in doc_folders:
         doc_slug = doc_folder.name
         
+        # [إضافة جديدة] متغيرات تجميع التوكنات على مستوى الوثيقة
+        doc_input_tokens = 0
+        doc_output_tokens = 0
+        
         print(f"\n" + "="*70)
         print(f"--- بدء الإثراء والروابط للوثيقة: {doc_slug} ---")
         
-        # ### [تحسين جديد] تحميل السياق الأساسي مرة واحدة لكل وثيقة
+        # تحميل السياق الأساسي مرة واحدة لكل وثيقة
         core_context = get_core_context(doc_slug, source_folder=source_path)
         
         # أ. إيجاد وترتيب جميع ملفات ALU داخل هذا المجلد الفرعي
@@ -288,8 +328,12 @@ def process_enrichment(input_folder="processed_systems_output"):
                 article_text_for_llm = text_content.strip()
                 
                 try:
-                    # [تحسين جديد] تمرير السياق الأساسي هنا
-                    llm_data = call_gemini_api(article_text_for_llm, core_context)
+                    # [تعديل] استقبال بيانات LLM والتوكنات
+                    llm_data, input_tokens, output_tokens = call_gemini_api(article_text_for_llm, core_context)
+                    
+                    # [إضافة جديدة] تجميع التوكنات للمحاولة الناجحة
+                    doc_input_tokens += input_tokens
+                    doc_output_tokens += output_tokens
                     
                     # دمج بيانات LLM في الميتاداتا
                     metadata['summary'] = llm_data.get('summary', metadata.get('summary'))
@@ -321,12 +365,29 @@ def process_enrichment(input_folder="processed_systems_output"):
                     # استمرار التحديث بالروابط حتى لو فشل LLM
                     update_alu_file(current_path, metadata, text_content)
                     total_processed += 1
+        
+        # تجميع توكنات الوثيقة في المجموع الكلي
+        total_input_tokens_grand += doc_input_tokens
+        total_output_tokens_grand += doc_output_tokens
 
         # ج. حفظ ملف ocr_review.json بعد معالجة جميع المواد
         save_ocr_review_file(doc_slug, all_doc_ocr_corrections, doc_folder)
+        
+        # [إضافة جديدة] طباعة ملخص توكنات الوثيقة
+        print("\n" + "💸 ملخص استهلاك الوثيقة الحالية:")
+        print(f"توكنات المدخل (Input Tokens): {doc_input_tokens}")
+        print(f"توكنات المخرج (Output Tokens): {doc_output_tokens}")
+        print("--------------------------------------------------")
+
 
     print("\n" + "="*70)
     print(f"✅ اكتمل الإثراء الدفعي. تم تحديث {total_processed} ملف ALU في {len(doc_folders)} وثيقة.")
+    
+    # [إضافة جديدة] طباعة ملخص التكلفة النهائي (للمبرمج)
+    print("\n" + "💰 ملخص التكلفة الإجمالي (Token Usage):" + "\n" + "="*70)
+    print(f"توكنات المدخل الكلي (Input Tokens): {total_input_tokens_grand}")
+    print(f"توكنات المخرج الكلي (Output Tokens): {total_output_tokens_grand}")
+    print(f"إجمالي التوكنات المستخدمة: {total_input_tokens_grand + total_output_tokens_grand}")
     print("==========================================================")
 
 # --- التشغيل المُحسَّن ---
